@@ -50,6 +50,10 @@ spec:
             brokerImage:
               description: BaseImage is the broker image to use for the Pods
               type: string
+              k8sClusterDomain
+            k8sClusterDomain:
+              description: The domain name of k8s cluster
+              type: string
             hostPath:
               description: HostPath is the local path to store data
               type: string

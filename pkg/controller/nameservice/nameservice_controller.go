@@ -38,6 +38,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -143,6 +144,47 @@ func (r *ReconcileNameService) Reconcile(request reconcile.Request) (reconcile.R
 		return reconcile.Result{Requeue: true}, nil
 	} else if err != nil {
 		reqLogger.Error(err, "Failed to get NameService StatefulSet.")
+	}
+
+	// Define a new service object
+	svc := r.newHeadlessService(instance)
+
+	// Check if the service already exists, if not create a new one
+	err = r.client.Get(context.TODO(), types.NamespacedName{Name: instance.Name, Namespace: instance.Namespace}, svc)
+	if err != nil && errors.IsNotFound(err) {
+		// Create service
+		if err := r.client.Create(context.TODO(), svc); err != nil {
+			reqLogger.Error(err, "Failed to create new Service of NameService", "Service.Namespace", svc.Namespace, "Service.Name", svc.Name)
+			return reconcile.Result{}, err
+		}
+		// Service created successfully - return and requeue
+		return reconcile.Result{Requeue: true}, nil
+	} else if err != nil {
+		reqLogger.Error(err, "Failed to get NameService Service.")
+		return reconcile.Result{}, err
+	}
+
+	exporter := &appsv1.StatefulSet{}
+	exporterName := instance.Name + "-exporter"
+	err = r.client.Get(context.TODO(), types.NamespacedName{Name: exporterName, Namespace: instance.Namespace}, exporter)
+	if err != nil && errors.IsNotFound(err) {
+		// create if not exist
+		exporter = r.ensureExporterStatefulSet(instance)
+		err = r.client.Create(context.TODO(), exporter)
+		if err != nil {
+			reqLogger.Error(err, "Failed to create new StatefulSet of Exporter", "StatefulSet.Namespace", instance.Namespace, "StatefulSet.Name", exporterName)
+		}
+		// StatefulSet created successfully - return and requeue
+		return reconcile.Result{Requeue: true}, nil
+	} else if err != nil {
+		reqLogger.Error(err, "Failed to get NameService StatefulSet.")
+	} else {
+		// update if exist
+		exporter = r.ensureExporterStatefulSet(instance)
+		err = r.client.Update(context.TODO(), exporter)
+		if err != nil {
+			reqLogger.Error(err, "Failed to create new StatefulSet of Exporter", "StatefulSet.Namespace", instance.Namespace, "StatefulSet.Name", exporterName)
+		}
 	}
 
 	// Ensure the statefulSet size is the same as the spec
@@ -415,7 +457,7 @@ func (r *ReconcileNameService) statefulSetForNameService(nameService *rocketmqv1
 	return dep
 }
 
-func (r *ReconcileNameService) getExporterStatefulSet(nameService *rocketmqv1alpha1.NameService) *appsv1.StatefulSet {
+func (r *ReconcileNameService) ensureExporterStatefulSet(nameService *rocketmqv1alpha1.NameService) *appsv1.StatefulSet {
 
 	var (
 		num           = int32(1)
@@ -492,6 +534,32 @@ func (r *ReconcileNameService) getExporterStatefulSet(nameService *rocketmqv1alp
 	// Set Broker instance as the owner and controller
 	controllerutil.SetControllerReference(nameService, exporterSts, r.scheme)
 	return exporterSts
+}
+
+func (r *ReconcileNameService) newHeadlessService(instance *rocketmqv1alpha1.NameService) interface{} {
+	svc := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      instance.Name,
+			Namespace: instance.Namespace,
+		},
+		Spec: corev1.ServiceSpec{
+			ClusterIP: corev1.ClusterIPNone,
+			Ports: []corev1.ServicePort{
+				{
+					Name:       "cluster",
+					Port:       cons.NameServiceMainContainerPort,
+					TargetPort: intstr.FromInt(cons.NameServiceMainContainerPort),
+					Protocol:   corev1.ProtocolTCP,
+				},
+			},
+			Selector: map[string]string{
+				"app": instance.Name,
+			},
+		},
+	}
+	// Set Broker instance as the owner and controller
+	controllerutil.SetControllerReference(instance, svc, r.scheme)
+	return svc
 }
 
 /*
