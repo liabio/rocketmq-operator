@@ -20,9 +20,11 @@ package nameservice
 
 import (
 	"context"
+	"fmt"
 	"os/exec"
 	"reflect"
 	"strconv"
+	"strings"
 	"time"
 
 	rocketmqv1alpha1 "github.com/apache/rocketmq-operator/pkg/apis/rocketmq/v1alpha1"
@@ -31,6 +33,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -172,11 +175,11 @@ func (r *ReconcileNameService) updateNameServiceStatus(instance *rocketmqv1alpha
 		reqLogger.Error(err, "Failed to list pods.", "NameService.Namespace", instance.Namespace, "NameService.Name", instance.Name)
 		return reconcile.Result{Requeue: true}, err
 	}
-	hostIps := getNameServers(podList.Items)
-
+	// Generate service domain
+	serverNames := getNameServers(instance.Name, instance.Namespace, instance.Spec.K8sClusterDomain, instance.Spec.Size)
 	// Update status.NameServers if needed
-	if !reflect.DeepEqual(hostIps, instance.Status.NameServers) {
-		oldNameServerListStr := ""
+	if !reflect.DeepEqual(serverNames, instance.Status.NameServers) {
+		/*oldNameServerListStr := ""
 		for _, value := range instance.Status.NameServers {
 			oldNameServerListStr = oldNameServerListStr + value + ":9876;"
 		}
@@ -196,7 +199,44 @@ func (r *ReconcileNameService) updateNameServiceStatus(instance *rocketmqv1alpha
 		}
 		reqLogger.Info("oldNameServerListStr:" + oldNameServerListStr)
 
-		instance.Status.NameServers = hostIps
+		instance.Status.NameServers = hostIps*/
+
+		// build new nameServerListStr
+		nameServerListStr := ""
+		for _, value := range serverNames {
+			var builder strings.Builder
+			builder.WriteString(nameServerListStr)
+			builder.WriteString(value)
+			builder.WriteString(":9876;")
+			nameServerListStr = builder.String()
+		}
+		if nameServerListStr == "" {
+			share.NameServersStr = nameServerListStr
+		} else {
+			share.NameServersStr = nameServerListStr[:len(nameServerListStr)-1]
+		}
+		reqLogger.Info("share.NameServersStr:" + share.NameServersStr)
+
+		// build old NameServerListStr
+		oldNameServerListStr := ""
+		for _, value := range instance.Status.NameServers {
+			var builder strings.Builder
+			builder.WriteString(oldNameServerListStr)
+			builder.WriteString(value)
+			builder.WriteString(":9876;")
+			oldNameServerListStr = builder.String()
+		}
+
+		if len(oldNameServerListStr) == 0 {
+			oldNameServerListStr = share.NameServersStr
+		} else {
+			oldNameServerListStr = oldNameServerListStr[:len(oldNameServerListStr)-1]
+			share.IsNameServersStrUpdated = true
+		}
+
+		reqLogger.Info("oldNameServerListStr:" + oldNameServerListStr)
+
+		instance.Status.NameServers = serverNames
 		err := r.client.Status().Update(context.TODO(), instance)
 		// Update the NameServers status with the host ips
 		reqLogger.Info("Updated the NameServers status with the host IP")
@@ -215,9 +255,10 @@ func (r *ReconcileNameService) updateNameServiceStatus(instance *rocketmqv1alpha
 
 			clusterName := share.BrokerClusterName
 			reqLogger.Info("Updating config " + key + " of cluster" + clusterName)
-			command := mqAdmin + " " + subCmd + " -c " + clusterName + " -k " + key + " -n " + oldNameServerListStr + " -v " + share.NameServersStr
+			//sh /home/rocketmq/operator/bin/mqadmin updateBrokerConfig -c brokerName -k namesrvAddr -n 1.1.1.1:9876,2.2.2.2:9876 -v 3.3.3.3:9876,4.4.4.4:9876
 			cmd := exec.Command("sh", mqAdmin, subCmd, "-c", clusterName, "-k", key, "-n", oldNameServerListStr, "-v", share.NameServersStr)
 			output, err := cmd.Output()
+			command := mqAdmin + " " + subCmd + " -c " + clusterName + " -k " + key + " -n " + oldNameServerListStr + " -v " + share.NameServersStr
 			if err != nil {
 				reqLogger.Error(err, "Update Broker config "+key+" failed of cluster "+clusterName+", command: "+command)
 				return reconcile.Result{Requeue: true}, err
@@ -226,7 +267,7 @@ func (r *ReconcileNameService) updateNameServiceStatus(instance *rocketmqv1alpha
 		}
 
 	}
-	// Print NameServers IP
+	// Print NameServers addr
 	for i, value := range instance.Status.NameServers {
 		reqLogger.Info("NameServers IP " + strconv.Itoa(i) + ": " + value)
 	}
@@ -241,6 +282,32 @@ func (r *ReconcileNameService) updateNameServiceStatus(instance *rocketmqv1alpha
 	}
 
 	return reconcile.Result{}, nil
+}
+
+func getNameServers(name, namespace, domain string, size int32) []string {
+	if domain == "" {
+		domain = "cluster.local"
+	}
+	var times int32
+	var nameServers []string
+	for {
+		var build strings.Builder
+		if times >= size {
+			break
+		}
+		//name-service-0.name-service.namespace.svc.cluster.local
+		build.WriteString(name)
+		build.WriteString("-")
+		build.WriteString(strconv.FormatInt(int64(times), 10))
+		build.WriteString(".")
+		build.WriteString(name)
+		build.WriteString(".")
+		build.WriteString(namespace)
+		build.WriteString(fmt.Sprintf(".svc.%s", domain))
+		nameServers = append(nameServers, build.String())
+		times++
+	}
+	return nameServers
 }
 
 func getVolumeClaimTemplates(nameService *rocketmqv1alpha1.NameService) []corev1.PersistentVolumeClaim {
@@ -279,13 +346,13 @@ func getVolumes(nameService *rocketmqv1alpha1.NameService) []corev1.Volume {
 	}
 }
 
-func getNameServers(pods []corev1.Pod) []string {
+/*func getNameServers(pods []corev1.Pod) []string {
 	var nameServers []string
 	for _, pod := range pods {
 		nameServers = append(nameServers, pod.Status.PodIP)
 	}
 	return nameServers
-}
+}*/
 
 func getRunningNameServersNum(pods []corev1.Pod) int32 {
 	var num int32 = 0
@@ -319,10 +386,10 @@ func (r *ReconcileNameService) statefulSetForNameService(nameService *rocketmqv1
 				},
 				Spec: corev1.PodSpec{
 					HostNetwork: nameService.Spec.HostNetwork,
-					DNSPolicy: nameService.Spec.DNSPolicy,
+					DNSPolicy:   nameService.Spec.DNSPolicy,
 					Containers: []corev1.Container{{
 						Resources: nameService.Spec.Resources,
-						Image: nameService.Spec.NameServiceImage,
+						Image:     nameService.Spec.NameServiceImage,
 						// Name must be lower case !
 						Name:            "name-service",
 						ImagePullPolicy: nameService.Spec.ImagePullPolicy,
@@ -346,4 +413,112 @@ func (r *ReconcileNameService) statefulSetForNameService(nameService *rocketmqv1
 	controllerutil.SetControllerReference(nameService, dep, r.scheme)
 
 	return dep
+}
+
+func (r *ReconcileNameService) getExporterStatefulSet(nameService *rocketmqv1alpha1.NameService) *appsv1.StatefulSet {
+
+	var (
+		num           = int32(1)
+		name          = nameService.Name + "-exporter"
+		containerName = "mq-exporter"
+		lb            = map[string]string{
+			"app": name,
+		}
+	)
+
+	exporterSts := &appsv1.StatefulSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Labels:    lb,
+			Name:      name,
+			Namespace: nameService.Namespace,
+		},
+		Spec: appsv1.StatefulSetSpec{
+			UpdateStrategy: appsv1.StatefulSetUpdateStrategy{
+				Type: appsv1.RollingUpdateStatefulSetStrategyType,
+			},
+			Replicas: &num,
+			Selector: &metav1.LabelSelector{
+				MatchLabels: lb,
+			},
+			ServiceName: name,
+			Template: corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: lb,
+				},
+				Spec: corev1.PodSpec{
+					/*	Affinity: &corev1.Affinity{
+						NodeAffinity: &corev1.NodeAffinity{
+							RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+								NodeSelectorTerms: []corev1.NodeSelectorTerm{
+									{
+										MatchExpressions: []corev1.NodeSelectorRequirement{
+											{
+												Key:      broker.Spec.MqNodeSelectorKey,
+												Operator: corev1.NodeSelectorOpIn,
+												Values:   []string{broker.Spec.MqNodeSelectorValue},
+											},
+										},
+									},
+								},
+							},
+						},
+					},*/
+					Containers: []corev1.Container{
+						{
+							Image:           nameService.Spec.ExporterImage,
+							ImagePullPolicy: corev1.PullIfNotPresent,
+							Name:            containerName,
+							Args: []string{
+								"--rocketmq.config.namesrvAddr=" + strings.Join(getNameServers(
+									nameService.Name,
+									nameService.Namespace,
+									nameService.Spec.K8sClusterDomain,
+									nameService.Spec.Size), ";"),
+							},
+							Ports: []corev1.ContainerPort{
+								{
+									ContainerPort: 5557,
+									Protocol:      corev1.ProtocolTCP,
+									Name:          containerName,
+								},
+							},
+							Resources: defaultExporterResource(),
+						},
+					},
+				},
+			},
+		},
+	}
+	// Set Broker instance as the owner and controller
+	controllerutil.SetControllerReference(nameService, exporterSts, r.scheme)
+	return exporterSts
+}
+
+/*
+func generateNameServerServiceName(nameserverReplicas int32, clusterName, namespace, port, domain string) (brokerId string) {
+	parseInt, err := strconv.ParseInt(port, 10, 32)
+	if err != nil {
+		parseInt = 30011
+	}
+	var (
+		sts string
+		i int32 = 0
+	)
+	for ; i < nameserverReplicas; i++ {
+		sts += fmt.Sprintf("%v-%v.%v.%v.svc.%s:%v;", clusterName, i, clusterName, namespace, domain, parseInt)
+	}
+	return sts[0 : len(sts)-1]
+}*/
+
+func defaultExporterResource() corev1.ResourceRequirements {
+	return corev1.ResourceRequirements{
+		Limits: corev1.ResourceList{
+			"cpu":    resource.MustParse("1500m"),
+			"memory": resource.MustParse("3Gi"),
+		},
+		Requests: corev1.ResourceList{
+			"cpu":    resource.MustParse("1000m"),
+			"memory": resource.MustParse("2Gi"),
+		},
+	}
 }

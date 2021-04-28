@@ -35,6 +35,8 @@ type NameServiceSpec struct {
 	Size int32 `json:"size"`
 	//NameServiceImage is the name service image
 	NameServiceImage string `json:"nameServiceImage"`
+	// ExporterImage is metric exporter for the broker
+	ExporterImage string `json:"exporterImage"`
 	// ImagePullPolicy defines how the image is pulled.
 	ImagePullPolicy corev1.PullPolicy `json:"imagePullPolicy"`
 	// HostNetwork can be true or false
@@ -49,6 +51,8 @@ type NameServiceSpec struct {
 	HostPath string `json:"hostPath"`
 	// VolumeClaimTemplates defines the StorageClass
 	VolumeClaimTemplates []corev1.PersistentVolumeClaim `json:"volumeClaimTemplates"`
+	// The domain name of k8s cluster
+	K8sClusterDomain string `json:"k8sClusterDomain"`
 }
 
 // NameServiceStatus defines the observed state of NameService

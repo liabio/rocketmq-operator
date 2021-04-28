@@ -56,6 +56,8 @@ type BrokerSpec struct {
 	VolumeClaimTemplates []corev1.PersistentVolumeClaim `json:"volumeClaimTemplates"`
 	// The name of pod where the metadata from
 	ScalePodName string `json:"scalePodName"`
+	// The domain name of k8s cluster
+	K8sClusterDomain string `json:"k8sClusterDomain"`
 }
 
 // BrokerStatus defines the observed state of Broker
