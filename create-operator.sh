@@ -31,12 +31,12 @@ if [ ! -e build/rocketmq.zip ]; then
 fi
 
 # use the following 2 commands if you have updated the [kind]_type.go file or don't have zz_generated.deepcopy.go and zz_generated.openapi.go files
-operator-sdk generate k8s
-operator-sdk generate openapi
+./build/bin/operator-sdk-v0.12.0 generate k8s
+./build/bin/operator-sdk-v0.12.0 generate openapi
 
 go mod vendor
 
 echo "Start building RocketMQ-Operator..."
-operator-sdk build $DOCKERHUB_REPO
+./build/bin/operator-sdk-v0.12.0 build $DOCKERHUB_REPO
 
 docker push $DOCKERHUB_REPO

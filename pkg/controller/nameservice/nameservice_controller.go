@@ -164,12 +164,13 @@ func (r *ReconcileNameService) Reconcile(request reconcile.Request) (reconcile.R
 		return reconcile.Result{}, err
 	}
 
-	exporter := &appsv1.StatefulSet{}
+	existExporter := &appsv1.Deployment{}
 	exporterName := instance.Name + "-exporter"
-	err = r.client.Get(context.TODO(), types.NamespacedName{Name: exporterName, Namespace: instance.Namespace}, exporter)
+	exporter := r.ensureExporterDeployment(instance)
+	err = r.client.Get(context.TODO(), types.NamespacedName{Name: exporterName, Namespace: instance.Namespace}, existExporter)
 	if err != nil && errors.IsNotFound(err) {
 		// create if not exist
-		exporter = r.ensureExporterStatefulSet(instance)
+
 		err = r.client.Create(context.TODO(), exporter)
 		if err != nil {
 			reqLogger.Error(err, "Failed to create new StatefulSet of Exporter", "StatefulSet.Namespace", instance.Namespace, "StatefulSet.Name", exporterName)
@@ -178,9 +179,8 @@ func (r *ReconcileNameService) Reconcile(request reconcile.Request) (reconcile.R
 		return reconcile.Result{Requeue: true}, nil
 	} else if err != nil {
 		reqLogger.Error(err, "Failed to get NameService StatefulSet.")
-	} else {
-		// update if exist
-		exporter = r.ensureExporterStatefulSet(instance)
+	} else if !reflect.DeepEqual(existExporter.Spec, exporter.Spec) {
+		// update if exist and necessary
 		err = r.client.Update(context.TODO(), exporter)
 		if err != nil {
 			reqLogger.Error(err, "Failed to create new StatefulSet of Exporter", "StatefulSet.Namespace", instance.Namespace, "StatefulSet.Name", exporterName)
@@ -244,14 +244,7 @@ func (r *ReconcileNameService) updateNameServiceStatus(instance *rocketmqv1alpha
 		instance.Status.NameServers = hostIps*/
 
 		// build new nameServerListStr
-		nameServerListStr := ""
-		for _, value := range serverNames {
-			var builder strings.Builder
-			builder.WriteString(nameServerListStr)
-			builder.WriteString(value)
-			builder.WriteString(":9876;")
-			nameServerListStr = builder.String()
-		}
+		nameServerListStr := strings.Join(serverNames, ";")
 		if nameServerListStr == "" {
 			share.NameServersStr = nameServerListStr
 		} else {
@@ -260,15 +253,7 @@ func (r *ReconcileNameService) updateNameServiceStatus(instance *rocketmqv1alpha
 		reqLogger.Info("share.NameServersStr:" + share.NameServersStr)
 
 		// build old NameServerListStr
-		oldNameServerListStr := ""
-		for _, value := range instance.Status.NameServers {
-			var builder strings.Builder
-			builder.WriteString(oldNameServerListStr)
-			builder.WriteString(value)
-			builder.WriteString(":9876;")
-			oldNameServerListStr = builder.String()
-		}
-
+		oldNameServerListStr := strings.Join(instance.Status.NameServers, ";")
 		if len(oldNameServerListStr) == 0 {
 			oldNameServerListStr = share.NameServersStr
 		} else {
@@ -281,7 +266,7 @@ func (r *ReconcileNameService) updateNameServiceStatus(instance *rocketmqv1alpha
 		instance.Status.NameServers = serverNames
 		err := r.client.Status().Update(context.TODO(), instance)
 		// Update the NameServers status with the host ips
-		reqLogger.Info("Updated the NameServers status with the host IP")
+		reqLogger.Info("Updated the NameServers status with the domain")
 		if err != nil {
 			reqLogger.Error(err, "Failed to update NameServers status of NameService.")
 			return reconcile.Result{Requeue: true}, err
@@ -307,11 +292,10 @@ func (r *ReconcileNameService) updateNameServiceStatus(instance *rocketmqv1alpha
 			}
 			reqLogger.Info("Successfully updated Broker config " + key + " of cluster " + clusterName + ", command: " + command + ", with output: " + string(output))
 		}
-
 	}
 	// Print NameServers addr
 	for i, value := range instance.Status.NameServers {
-		reqLogger.Info("NameServers IP " + strconv.Itoa(i) + ": " + value)
+		reqLogger.Info("NameServers Domain " + strconv.Itoa(i) + ": " + value)
 	}
 
 	runningNameServerNum := getRunningNameServersNum(podList.Items)
@@ -346,6 +330,7 @@ func getNameServers(name, namespace, domain string, size int32) []string {
 		build.WriteString(".")
 		build.WriteString(namespace)
 		build.WriteString(fmt.Sprintf(".svc.%s", domain))
+		build.WriteString(":9876")
 		nameServers = append(nameServers, build.String())
 		times++
 	}
@@ -422,6 +407,7 @@ func (r *ReconcileNameService) statefulSetForNameService(nameService *rocketmqv1
 			Selector: &metav1.LabelSelector{
 				MatchLabels: ls,
 			},
+			ServiceName: nameService.Name,
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: ls,
@@ -457,7 +443,7 @@ func (r *ReconcileNameService) statefulSetForNameService(nameService *rocketmqv1
 	return dep
 }
 
-func (r *ReconcileNameService) ensureExporterStatefulSet(nameService *rocketmqv1alpha1.NameService) *appsv1.StatefulSet {
+func (r *ReconcileNameService) ensureExporterDeployment(nameService *rocketmqv1alpha1.NameService) *appsv1.Deployment {
 
 	var (
 		num           = int32(1)
@@ -468,21 +454,32 @@ func (r *ReconcileNameService) ensureExporterStatefulSet(nameService *rocketmqv1
 		}
 	)
 
-	exporterSts := &appsv1.StatefulSet{
+	probe := &corev1.Probe{
+		InitialDelaySeconds: 15,
+		PeriodSeconds:       20,
+		Handler: corev1.Handler{
+			TCPSocket: &corev1.TCPSocketAction{
+				Port: intstr.IntOrString{
+					Type:   intstr.String,
+					StrVal: containerName,
+				},
+			},
+		},
+	}
+	exporterSts := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Labels:    lb,
 			Name:      name,
 			Namespace: nameService.Namespace,
 		},
-		Spec: appsv1.StatefulSetSpec{
-			UpdateStrategy: appsv1.StatefulSetUpdateStrategy{
-				Type: appsv1.RollingUpdateStatefulSetStrategyType,
+		Spec: appsv1.DeploymentSpec{
+			Strategy: appsv1.DeploymentStrategy{
+				Type: appsv1.RollingUpdateDeploymentStrategyType,
 			},
 			Replicas: &num,
 			Selector: &metav1.LabelSelector{
 				MatchLabels: lb,
 			},
-			ServiceName: name,
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
 					Labels: lb,
@@ -524,7 +521,9 @@ func (r *ReconcileNameService) ensureExporterStatefulSet(nameService *rocketmqv1
 									Name:          containerName,
 								},
 							},
-							Resources: defaultExporterResource(),
+							LivenessProbe:  probe,
+							ReadinessProbe: probe,
+							Resources:      defaultExporterResource(),
 						},
 					},
 				},
@@ -536,7 +535,7 @@ func (r *ReconcileNameService) ensureExporterStatefulSet(nameService *rocketmqv1
 	return exporterSts
 }
 
-func (r *ReconcileNameService) newHeadlessService(instance *rocketmqv1alpha1.NameService) interface{} {
+func (r *ReconcileNameService) newHeadlessService(instance *rocketmqv1alpha1.NameService) *corev1.Service {
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      instance.Name,
@@ -552,9 +551,7 @@ func (r *ReconcileNameService) newHeadlessService(instance *rocketmqv1alpha1.Nam
 					Protocol:   corev1.ProtocolTCP,
 				},
 			},
-			Selector: map[string]string{
-				"app": instance.Name,
-			},
+			Selector: labelsForNameService(instance.Name),
 		},
 	}
 	// Set Broker instance as the owner and controller

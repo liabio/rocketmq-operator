@@ -200,14 +200,25 @@ func (r *ReconcileBroker) Reconcile(request reconcile.Request) (reconcile.Result
 				if err != nil {
 					reqLogger.Error(err, "Failed to get broker master StatefulSet of "+brokerName)
 				} else {
-					found.Spec.Template.Spec.Containers[0].Env[0].Value = share.NameServersStr
-					err = r.client.Update(context.TODO(), found)
-					if err != nil {
-						reqLogger.Error(err, "Failed to update NAMESRV_ADDR of master broker "+brokerName, "StatefulSet.Namespace", found.Namespace, "StatefulSet.Name", found.Name)
-					} else {
-						reqLogger.Info("Successfully updated NAMESRV_ADDR of master broker "+brokerName, "StatefulSet.Namespace", found.Namespace, "StatefulSet.Name", found.Name)
+					isChanged := false
+					for index := range found.Spec.Template.Spec.Containers[0].Env {
+						if cons.EnvNameServiceAddress == found.Spec.Template.Spec.Containers[0].Env[index].Name {
+							if found.Spec.Template.Spec.Containers[0].Env[index].Value != share.NameServersStr {
+								isChanged = true
+								found.Spec.Template.Spec.Containers[0].Env[index].Value = share.NameServersStr
+							}
+							break
+						}
 					}
-					time.Sleep(time.Duration(cons.RestartBrokerPodIntervalInSecond) * time.Second)
+					if isChanged {
+						err = r.client.Update(context.TODO(), found)
+						if err != nil {
+							reqLogger.Error(err, "Failed to update NAMESRV_ADDR of master broker "+brokerName, "StatefulSet.Namespace", found.Namespace, "StatefulSet.Name", found.Name)
+						} else {
+							reqLogger.Info("Successfully updated NAMESRV_ADDR of master broker "+brokerName, "StatefulSet.Namespace", found.Namespace, "StatefulSet.Name", found.Name)
+						}
+						time.Sleep(time.Duration(cons.RestartBrokerPodIntervalInSecond) * time.Second)
+					}
 				}
 				// Update replicas brokers
 				for replicaIndex := 1; replicaIndex <= replicaPerGroup; replicaIndex++ {
@@ -218,19 +229,25 @@ func (r *ReconcileBroker) Reconcile(request reconcile.Request) (reconcile.Result
 					if err != nil {
 						reqLogger.Error(err, "Failed to get broker replica StatefulSet of "+brokerName)
 					} else {
+						isChanged := false
 						for index := range replicaFound.Spec.Template.Spec.Containers[0].Env {
 							if cons.EnvNameServiceAddress == replicaFound.Spec.Template.Spec.Containers[0].Env[index].Name {
-								replicaFound.Spec.Template.Spec.Containers[0].Env[index].Value = share.NameServersStr
+								if replicaFound.Spec.Template.Spec.Containers[0].Env[index].Value != share.NameServersStr {
+									isChanged = true
+									replicaFound.Spec.Template.Spec.Containers[0].Env[index].Value = share.NameServersStr
+								}
 								break
 							}
 						}
-						err = r.client.Update(context.TODO(), replicaFound)
-						if err != nil {
-							reqLogger.Error(err, "Failed to update NAMESRV_ADDR of "+strconv.Itoa(brokerGroupIndex)+"-replica-"+strconv.Itoa(replicaIndex), "StatefulSet.Namespace", replicaFound.Namespace, "StatefulSet.Name", replicaFound.Name)
-						} else {
-							reqLogger.Info("Successfully updated NAMESRV_ADDR of "+strconv.Itoa(brokerGroupIndex)+"-replica-"+strconv.Itoa(replicaIndex), "StatefulSet.Namespace", replicaFound.Namespace, "StatefulSet.Name", replicaFound.Name)
+						if isChanged {
+							err = r.client.Update(context.TODO(), replicaFound)
+							if err != nil {
+								reqLogger.Error(err, "Failed to update NAMESRV_ADDR of "+strconv.Itoa(brokerGroupIndex)+"-replica-"+strconv.Itoa(replicaIndex), "StatefulSet.Namespace", replicaFound.Namespace, "StatefulSet.Name", replicaFound.Name)
+							} else {
+								reqLogger.Info("Successfully updated NAMESRV_ADDR of "+strconv.Itoa(brokerGroupIndex)+"-replica-"+strconv.Itoa(replicaIndex), "StatefulSet.Namespace", replicaFound.Namespace, "StatefulSet.Name", replicaFound.Name)
+							}
+							time.Sleep(time.Duration(cons.RestartBrokerPodIntervalInSecond) * time.Second)
 						}
-						time.Sleep(time.Duration(cons.RestartBrokerPodIntervalInSecond) * time.Second)
 					}
 				}
 			}
@@ -405,8 +422,8 @@ func (r *ReconcileBroker) getBrokerStatefulSet(broker *rocketmqv1alpha1.Broker, 
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{
 						Resources: broker.Spec.Resources,
-						Image: broker.Spec.BrokerImage,
-						Name:  cons.BrokerContainerName,
+						Image:     broker.Spec.BrokerImage,
+						Name:      cons.BrokerContainerName,
 						Lifecycle: &corev1.Lifecycle{
 							PostStart: &corev1.Handler{
 								Exec: &corev1.ExecAction{
@@ -415,7 +432,7 @@ func (r *ReconcileBroker) getBrokerStatefulSet(broker *rocketmqv1alpha1.Broker, 
 							},
 						},
 						ImagePullPolicy: broker.Spec.ImagePullPolicy,
-						Env: getENV(broker, replicaIndex, brokerGroupIndex),
+						Env:             getENV(broker, replicaIndex, brokerGroupIndex),
 						Ports: []corev1.ContainerPort{{
 							ContainerPort: cons.BrokerVipContainerPort,
 							Name:          cons.BrokerVipContainerPortName,
@@ -453,7 +470,7 @@ func (r *ReconcileBroker) getBrokerStatefulSet(broker *rocketmqv1alpha1.Broker, 
 
 }
 
-func getENV(broker *rocketmqv1alpha1.Broker, replicaIndex int, brokerGroupIndex int)  []corev1.EnvVar {
+func getENV(broker *rocketmqv1alpha1.Broker, replicaIndex int, brokerGroupIndex int) []corev1.EnvVar {
 	envs := []corev1.EnvVar{{
 		Name:  cons.EnvNameServiceAddress,
 		Value: share.NameServersStr,
